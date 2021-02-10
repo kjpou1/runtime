@@ -59,19 +59,24 @@ var BindingSupportLib = {
 			this.invoke_method = Module.cwrap ('mono_wasm_invoke_method', 'number', ['number', 'number', 'number', 'number']);
 			this.mono_string_get_utf8 = Module.cwrap ('mono_wasm_string_get_utf8', 'number', ['number']);
 			this.mono_wasm_string_from_utf16 = Module.cwrap ('mono_wasm_string_from_utf16', 'number', ['number', 'number']);
+			this.mono_wasm_get_obj_class = Module.cwrap ('mono_wasm_get_obj_class', 'number', ['number']);
 			this.mono_get_obj_type = Module.cwrap ('mono_wasm_get_obj_type', 'number', ['number']);
 			this.mono_array_length = Module.cwrap ('mono_wasm_array_length', 'number', ['number']);
 			this.mono_array_get = Module.cwrap ('mono_wasm_array_get', 'number', ['number', 'number']);
 			this.mono_obj_array_new = Module.cwrap ('mono_wasm_obj_array_new', 'number', ['number']);
 			this.mono_obj_array_set = Module.cwrap ('mono_wasm_obj_array_set', 'void', ['number', 'number', 'number']);
 			this.mono_wasm_register_bundled_satellite_assemblies = Module.cwrap ('mono_wasm_register_bundled_satellite_assemblies', 'void', [ ]);
-			this.mono_wasm_try_unbox_primitive_and_get_type = Module.cwrap ('mono_wasm_try_unbox_primitive_and_get_type', 'number', ['number', 'number']);
+			this.mono_wasm_try_unbox_primitive_and_get_type = Module.cwrap ('mono_wasm_try_unbox_primitive_and_get_type', 'number', ['number', 'number', 'number']);
 			this.mono_wasm_box_primitive = Module.cwrap ('mono_wasm_box_primitive', 'number', ['number', 'number', 'number']);
 			this.mono_wasm_intern_string = Module.cwrap ('mono_wasm_intern_string', 'number', ['number']);
 			this.assembly_get_entry_point = Module.cwrap ('mono_wasm_assembly_get_entry_point', 'number', ['number']);
+			this.mono_wasm_create_method_signature_info = Module.cwrap ('mono_wasm_create_method_signature_info', 'number', ['number', 'number']);
+			this.mono_wasm_unbox_rooted = Module.cwrap ('mono_wasm_unbox_rooted', 'number', ['number']);
+			this.mono_wasm_get_class_for_bind_or_invoke = Module.cwrap ('mono_wasm_get_class_for_bind_or_invoke', 'number', ['number', 'number']);
 
-			this._box_buffer = Module._malloc(16);
-			this._unbox_buffer = Module._malloc(16);
+			this._box_buffer = Module._malloc(32);
+			this._unbox_buffer_size = 65536;
+			this._unbox_buffer = Module._malloc(this._unbox_buffer_size);
 			this._class_int32 = this.find_corlib_class ("System", "Int32");
 			this._class_uint32 = this.find_corlib_class ("System", "UInt32");
 			this._class_double = this.find_corlib_class ("System", "Double");
@@ -355,7 +360,7 @@ var BindingSupportLib = {
 				root.release();
 			}
 		},
-
+		
 		_unbox_delegate_rooted: function (mono_obj) {
 			var obj = this.extract_js_obj (mono_obj);
 			obj.__mono_delegate_alive__ = true;
@@ -399,7 +404,7 @@ var BindingSupportLib = {
 			return requiredObject;
 		},
 
-		_unbox_mono_obj_rooted_with_known_nonprimitive_type: function (mono_obj, type) {
+		_unbox_mono_obj_rooted_with_known_nonprimitive_type: function (mono_obj, type, klass) {
 			//See MARSHAL_TYPE_ defines in driver.c
 			switch (type) {
 				case 26: // int64
@@ -410,14 +415,14 @@ var BindingSupportLib = {
 					return this.conv_string (mono_obj, false);
 				case 29: // interned string
 					return this.conv_string (mono_obj, true);
-				case 4: //vts
-					throw new Error ("no idea on how to unbox value types");
+				case 4: // struct
+					throw new Error ("slow-path struct unbox not implemented");
 				case 5: // delegate
 					return this._unbox_delegate_rooted (mono_obj);
 				case 6: // Task
 					return this._unbox_task_rooted (mono_obj);
 				case 7: // ref type
-					return this.extract_js_obj (mono_obj);
+					return this.extract_js_obj_with_possible_converter (mono_obj, klass);
 				case 10: // arrays
 				case 11:
 				case 12:
@@ -449,10 +454,12 @@ var BindingSupportLib = {
 			if (mono_obj === 0)
 				return undefined;
 
-			var type = this.mono_wasm_try_unbox_primitive_and_get_type (mono_obj, this._unbox_buffer);
+			var type = this.mono_wasm_try_unbox_primitive_and_get_type (mono_obj, this._unbox_buffer, this._unbox_buffer_size);
 			switch (type) {
 				case 1: // int
 					return Module.HEAP32[this._unbox_buffer / 4];
+				case 4: // struct
+					return this._unbox_struct_rooted (this._unbox_buffer, mono_obj);
 				case 25: // uint32
 					return Module.HEAPU32[this._unbox_buffer / 4];
 				case 24: // float32
@@ -464,7 +471,8 @@ var BindingSupportLib = {
 				case 28: // char
 					return String.fromCharCode(Module.HEAP32[this._unbox_buffer / 4]);
 				default:
-					return this._unbox_mono_obj_rooted_with_known_nonprimitive_type (mono_obj, type);
+					var klass = Module.HEAPU32[this._unbox_buffer / 4];
+					return this._unbox_mono_obj_rooted_with_known_nonprimitive_type (mono_obj, type, klass);
 			}
 		},
 
@@ -834,6 +842,17 @@ var BindingSupportLib = {
 			return result;
 		},
 
+		extract_js_obj_with_possible_converter: function (mono_obj, klass) {
+			if (mono_obj == 0)
+				return null;
+
+			var converter = this._try_get_converter_for_managed_class (klass);
+			if (converter)
+				return converter (mono_obj);
+
+			return this.extract_js_obj (mono_obj);
+		},
+
 		extract_js_obj: function (mono_obj) {
 			if (mono_obj == 0)
 				return null;
@@ -924,7 +943,311 @@ var BindingSupportLib = {
 			return result;
 		},
 
-		_create_converter_for_marshal_string: function (args_marshal) {
+		name_for_marshal_type: function (mtype) {
+			var MarshalTypeValues = {
+				"INT": 1,
+				"FP64": 2,
+				"STRING": 3,
+				"VT": 4,
+				"DELEGATE": 5,
+				"TASK": 6,
+				"OBJECT": 7,
+				"BOOL": 8,
+				"ENUM": 9,
+				"DATE": 20,
+				"DATEOFFSET": 21,
+				"URI": 22,
+				"SAFEHANDLE": 23,
+				"ARRAY_BYTE": 10,
+				"ARRAY_UBYTE": 11,
+				"ARRAY_UBYTE_C": 12,
+				"ARRAY_SHORT": 13,
+				"ARRAY_USHORT": 14,
+				"ARRAY_INT": 15,
+				"ARRAY_UINT": 16,
+				"ARRAY_FLOAT": 17,
+				"ARRAY_DOUBLE": 18,
+				"FP32": 24,
+				"UINT32": 25,
+				"INT64": 26,
+				"UINT64": 27,
+				"CHAR": 28,
+				"STRING_INTERNED": 29,
+				"VOID": 30,
+			};
+
+			// FIXME
+			var MarshalTypeNames = {};
+			for (var k in MarshalTypeValues)
+				MarshalTypeNames[MarshalTypeValues[k]] = k;
+
+			return MarshalTypeNames[mtype] || String(mtype);
+		},
+
+		get_method_signature_info: function (classPtr, methodPtr) {
+			if (!classPtr)
+				throw new Error("Class ptr not provided");
+			if (!methodPtr)
+				throw new Error("Method ptr not provided");
+				
+			if (!this._method_signature_info_table)
+				this._method_signature_info_table = new Map ();
+			var result = this._method_signature_info_table.get (methodPtr);
+			var classMismatch = !!result && (result.classPtr !== classPtr);
+			if (!result) {
+				infoPtr = this.mono_wasm_create_method_signature_info (classPtr, methodPtr);
+
+/*
+typedef struct wasm_method_signature_info {
+	int result_marshal_type;
+	MonoClass* result_class;
+	int parameter_count;
+	int* parameter_marshal_types;
+	MonoClass** parameter_classes;
+} wasm_method_signature_info;
+*/
+				var off32 = infoPtr >> 2;
+				var pcount = Module.HEAPU32[off32 + 2],
+					pmtypesPtr = Module.HEAPU32[off32 + 3] >> 2,
+					pclassesPtr = Module.HEAPU32[off32 + 4] >> 2;
+
+				var parms = new Array(pcount);
+				for (var i = 0; i < pcount; i++)
+					parms[i] = { 
+						"marshalType": Module.HEAPU32[pmtypesPtr + i], 
+						"class": Module.HEAPU32[pclassesPtr + i]
+					};
+
+				result = {
+					"result": {
+						"marshalType": Module.HEAPU32[off32 + 0], 
+						"class": Module.HEAPU32[off32 + 1] 
+					},
+					"parameters": parms,
+					"classPtr": classPtr
+				};
+
+				Module._free (infoPtr);
+				if (classMismatch)
+					console.log("WARNING: Class ptr mismatch for signature info, so caching is disabled");
+				else
+					this._method_signature_info_table.set (methodPtr, result);
+				// console.log(methodPtr, JSON.stringify(result));
+			}
+			return result;
+		},
+
+		_compile_post_filter: function (classPtr, boundConverter, js) {
+			if (!js)
+				return boundConverter;
+			
+			var closure = { 
+				MONO: MONO,
+				BINDING: this,
+				classPtr: classPtr, 
+				// (value) => filtered_value
+				boundConverter: boundConverter 
+			};
+			var body = [
+				"var value = boundConverter (js_value), filteredValue = null;",
+				// "console.log(`value === ${value}`);",
+				`{ filteredValue = ${js}; }`,
+				// "console.log(`filteredValue === ${filteredValue}`);",
+				"return filteredValue;"
+			];
+			
+			var bodyJs = body.join ("\r\n");
+			var result = this._create_named_function(
+				"post_filtered_converter_for_class" + classPtr, 
+				["js_value"], bodyJs, closure
+			);
+
+			// console.log("compile result", result);
+			return result;
+		},
+
+		_try_get_converter_for_managed_class: function (klass) {
+			// console.log (`klass ${klass}`);
+
+			if (!this._class_converter_cache)
+				this._class_converter_cache = new Map ();
+
+			if (!this._class_converter_cache.has (klass)) {
+				var convMethod = this.find_method (klass, "ManagedToJS", 1);
+				if (!convMethod)
+					this._class_converter_cache.set (klass, null);
+				else {
+					var sigInfo = this.get_method_signature_info (klass, convMethod);
+					var signature = "m";
+					var boundConverter = this.bind_method (
+						convMethod, 0, signature, "ManagedToJS_class" + klass
+					);
+
+					// FIXME: Optimize this
+					var postFilterGetter = this.find_method (klass, "ManagedToJS_PostFilter", 0);
+					var postFilter = postFilterGetter 
+						? this.call_method (postFilterGetter, 0, "", [])
+						: null;
+
+					this._class_converter_cache.set (klass, this._compile_post_filter (klass, boundConverter, postFilter));
+				}
+			}
+
+			return this._class_converter_cache.get (klass);
+		},
+
+		_pick_result_chara_for_marshal_type: function (mtype) {
+			var signatureChForMtype = {
+				1: 'i',
+				2: 'd',
+				3: 's',
+				7: 'o',
+				9: 'j',
+				22: 'u', // FIXME
+				24: 'f',
+				25: 'i',
+				26: 'l',
+				27: 'l',
+				28: 'i', // FIXME
+			};
+			if (mtype === 4)
+				throw new Error ("ManagedToJS cannot return a struct");
+			return signatureChForMtype[mtype] || 'a';
+		},
+
+		_unbox_struct_rooted: function (unbox_buffer, mono_obj) {
+			var objSize = Module.HEAP32[(unbox_buffer / 4) | 0];
+			var classPtr = Module.HEAP32[((unbox_buffer / 4) | 0) + 1];
+			var dataOffset = unbox_buffer + 8;
+
+			// console.log (`objSize ${objSize} classPtr ${classPtr} dataOffset ${dataOffset}`);
+
+			if (!this._struct_unboxer_cache)
+				this._struct_unboxer_cache = new Map ();
+
+			if (!this._struct_unboxer_cache.has (classPtr)) {
+				var postFilterGetter = this.find_method (classPtr, "ManagedToJS_PostFilter", 0);
+				var postFilter = postFilterGetter 
+					? this.call_method (postFilterGetter, 0, "", [])
+					: null;
+
+				// console.log ("postFilter", postFilter);
+
+				var convMethod = this.find_method (classPtr, "ManagedToJS", 1);
+				if (!convMethod)
+					this._struct_unboxer_cache.set (classPtr, null);
+				else {
+					var sigInfo = this.get_method_signature_info (classPtr, convMethod);
+					var signature = "m";
+					var boundConverter = this.bind_method (
+						convMethod, 0, signature, "ManagedToJS_class" + classPtr
+					);
+
+					this._struct_unboxer_cache.set (classPtr, this._compile_post_filter (classPtr, boundConverter, postFilter));
+				}
+			}
+
+			var unboxer = this._struct_unboxer_cache.get (classPtr);
+			if (!unboxer)
+				throw new Error ("No managed-to-js converter found for struct type " + classPtr);
+
+			// FIXME: Pass a ReadOnlySpan or ReadOnlyMemory instead of a bare pointer
+			return unboxer (dataOffset);
+		},
+
+		_compile_pre_filter: function (classPtr, boundConverter, js) {
+			if (!js)
+				return boundConverter;
+			
+			var closure = { 
+				MONO: MONO,
+				BINDING: this,
+				classPtr: classPtr, 
+				// (js_obj, method, parmIdx) => value
+				boundConverter: boundConverter 
+			};
+			var body = [
+				"var filteredValue = null;",
+				// "console.log(`preFilter(${value})`);",
+				`{ filteredValue = ${js}; }`,
+				// "console.log(`preFilter === ${filteredValue}`);",
+				"var convertedResult = boundConverter (filteredValue, method, parmIdx);",
+				// "console.log(`convertedResult === ${convertedResult}`);",
+				"return convertedResult;"
+			];
+			
+			var bodyJs = body.join ("\r\n");
+			var result = this._create_named_function(
+				"pre_filtered_converter_for_class" + classPtr, 
+				["value", "method", "parmIdx"], bodyJs, closure
+			);
+
+			// console.log("compile result", result);
+			return result;
+		},
+
+		_pick_automatic_converter_for_user_type: function (methodPtr, args_marshal, classPtr) {
+			if (!this._automatic_converter_table)
+				this._automatic_converter_table = new Map ();
+			if (!this._automatic_converter_table.has (classPtr)) {
+				var preFilterGetter = this.find_method(classPtr, "JSToManaged_PreFilter", 0);
+
+				var preFilter = preFilterGetter 
+					? this.call_method (preFilterGetter, 0, "", [])
+					: null;
+
+				// console.log ("preFilter", preFilter);
+
+				var convMethod = this.find_method (classPtr, "JSToManaged", 1);
+				// FIXME
+				var sigInfo = this.get_method_signature_info (classPtr, convMethod);
+				// Return unboxed so it can go directly into the arguments list
+				var signature = this._pick_result_chara_for_marshal_type (sigInfo.parameters[0].marshalType) + "!";
+				// console.log("jstm signature", signature);
+				var boundConverter = this.bind_method (
+					convMethod, 0, signature, "JSToManaged_class" + classPtr
+				);
+
+				var result = this._compile_pre_filter (classPtr, boundConverter, preFilter);
+				this._automatic_converter_table.set (classPtr, result);
+			}
+			return this._automatic_converter_table.get (classPtr);
+		},
+
+		_pick_automatic_converter: function (methodPtr, args_marshal, paramRecord) {
+			var result = {
+				size: 0,
+				needs_unbox: false,
+				needs_root: true,
+				key: 'a'
+			};
+
+			switch (paramRecord.marshalType) {
+				case 4: // Struct
+					result.needs_unbox = true;
+					; // FIXME: Fall-through
+				case 7: // OBJECT
+					var res = this._pick_automatic_converter_for_user_type (methodPtr, args_marshal, paramRecord.class);
+					if (res) {
+						result.convert = res;
+						break;
+					}
+					; // FIXME: Fall-through
+				default:
+					// FIXME
+					// console.log("found no automatic converter for mtype", paramRecord.marshalType);
+					result.convert = this.js_to_mono_obj.bind(this);
+					break;
+			}
+
+			// console.log(JSON.stringify(result));
+			return result;
+		},
+
+		// FIXME
+		_create_converter_for_marshal_string: function (classPtr, method, args_marshal) {
+			var sigInfo = this.get_method_signature_info (classPtr, method);
+
 			var primitiveConverters = this._primitive_converters;
 			if (!primitiveConverters)
 				primitiveConverters = this._create_primitive_converters ();
@@ -934,10 +1257,24 @@ var BindingSupportLib = {
 			var is_result_definitely_unmarshaled = false,
 				is_result_possibly_unmarshaled = false,
 				result_unmarshaled_if_argc = -1,
-				needs_root_buffer = false;
+				needs_root_buffer = false,
+				depends_on_method_arguments = false;
 
 			for (var i = 0; i < args_marshal.length; ++i) {
 				var key = args_marshal[i];
+
+				if (key === "a") {
+					if (!method)
+						throw new Error ("Cannot use automatic argument type handling without a method ptr");
+					depends_on_method_arguments = true;
+					var step = this._pick_automatic_converter(method, args_marshal, sigInfo.parameters[i]);
+					if (!step)
+						throw new Error (`Failed to select an automatic converter for parameter #${i} of method ${method}`);
+					steps.push(step);
+					needs_root_buffer = true;
+					size += step.size;
+					continue;
+				}
 
 				if (i === args_marshal.length - 1) {
 					if (key === "!") {
@@ -947,24 +1284,26 @@ var BindingSupportLib = {
 						is_result_possibly_unmarshaled = true;
 						result_unmarshaled_if_argc = args_marshal.length - 1;
 					}
-				} else if (key === "!")
+				} else if (key === "!") {
 					throw new Error ("! must be at the end of the signature");
+				}
 
-				var conv = primitiveConverters.get (key);
+				conv = primitiveConverters.get (key);
 				if (!conv)
-					throw new Error ("Unknown parameter type " + type);
+					throw new Error (`Unknown parameter type ${key}`);
 
 				var localStep = Object.create (conv.steps[0]);
 				localStep.size = conv.size;
 				if (conv.needs_root)
 					needs_root_buffer = true;
 				localStep.needs_root = conv.needs_root;
-				localStep.key = args_marshal[i];
+				localStep.key = key;
 				steps.push (localStep);
 				size += conv.size;
 			}
 
 			return {
+				method: depends_on_method_arguments ? method : null,
 				steps: steps, size: size, args_marshal: args_marshal,
 				is_result_definitely_unmarshaled: is_result_definitely_unmarshaled,
 				is_result_possibly_unmarshaled: is_result_possibly_unmarshaled,
@@ -973,28 +1312,42 @@ var BindingSupportLib = {
 			};
 		},
 
-		_get_converter_for_marshal_string: function (args_marshal) {
+		_get_converter_for_marshal_string: function (classPtr, method, args_marshal) {
 			if (!this._signature_converters)
 				this._signature_converters = new Map();
 
 			var converter = this._signature_converters.get (args_marshal);
+			var map = null;
+			if (converter instanceof Map) {
+				map = converter;
+				converter = map.get (method);
+				// console.log (`method-keyed converter map for signature '${args_marshal}' result for method ${method}:`, converter);
+			}
+
 			if (!converter) {
-				converter = this._create_converter_for_marshal_string (args_marshal);
-				this._signature_converters.set (args_marshal, converter);
+				converter = this._create_converter_for_marshal_string (classPtr, method, args_marshal);
+				if (converter.method) {
+					if (!map)
+						this._signature_converters.set (args_marshal, map = new Map ());
+					// console.log (`compiled converter for signature '${args_marshal}' and method '${method}'`);
+					map.set (converter.method, converter);
+				} else {
+					this._signature_converters.set (args_marshal, converter);
+				}
 			}
 
 			return converter;
 		},
 
-		_compile_converter_for_marshal_string: function (args_marshal) {
-			var converter = this._get_converter_for_marshal_string (args_marshal);
+		_compile_converter_for_marshal_string: function (classPtr, method, args_marshal) {
+			var converter = this._get_converter_for_marshal_string (classPtr, method, args_marshal);
 			if (typeof (converter.args_marshal) !== "string")
 				throw new Error ("Corrupt converter for '" + args_marshal + "'");
 
 			if (converter.compiled_function && converter.compiled_variadic_function)
 				return converter;
 
-			var converterName = args_marshal.replace("!", "_result_unmarshaled");
+			var converterName = args_marshal.replace ("!", "_result_unmarshaled");
 			converter.name = converterName;
 
 			var body = [];
@@ -1027,13 +1380,21 @@ var BindingSupportLib = {
 
 				if (step.convert) {
 					closure[closureKey] = step.convert;
-					body.push (`var ${valueKey} = ${closureKey}(${argKey}, method, ${i});`);
+					body.push (`var ${valueKey} = ${closureKey} (${argKey}, method, ${i});`);
 				} else {
 					body.push (`var ${valueKey} = ${argKey};`);
 				}
 
 				if (step.needs_root)
 					body.push (`rootBuffer.set (${i}, ${valueKey});`);
+
+				// HACK: needs_unbox indicates that we were passed a pointer to a managed object, and either
+				//  it was already rooted by our caller or (needs_root = true) by us. Now we can unbox it and
+				//  pass the raw address of its boxed value into the callee.
+				if (step.needs_unbox) {
+					closure.mono_wasm_unbox_rooted = this.mono_wasm_unbox_rooted;
+					body.push (`${valueKey} = mono_wasm_unbox_rooted (${valueKey});`);
+				}
 
 				if (step.indirect) {
 					var heapArrayName = null;
@@ -1261,7 +1622,11 @@ var BindingSupportLib = {
 
 			// check if the method signature needs argument mashalling
 			if (needs_converter) {
-				converter = this._compile_converter_for_marshal_string (args_marshal);
+				var classPtr = this.mono_wasm_get_class_for_bind_or_invoke (this_arg, method);
+				if (!classPtr)
+					throw new Error (`Could not get class ptr for call_method with this (${this_arg}) and method (${method})`);
+
+				converter = this._compile_converter_for_marshal_string (classPtr, method, args_marshal);
 
 				is_result_marshaled = this._decide_if_result_is_marshaled (converter, args.length);
 
@@ -1332,8 +1697,12 @@ var BindingSupportLib = {
 			this_arg = this_arg | 0;
 
 			var converter = null;
-			if (typeof (args_marshal) === "string")
-				converter = this._compile_converter_for_marshal_string (args_marshal);
+			if (typeof (args_marshal) === "string") {
+				var classPtr = this.mono_wasm_get_class_for_bind_or_invoke (this_arg, method);
+				if (!classPtr)
+					throw new Error (`Could not get class ptr for bind_method with this (${this_arg}) and method (${method})`);
+				converter = this._compile_converter_for_marshal_string (classPtr, method, args_marshal);
+			}
 
 			var closure = {
 				library_mono: MONO,
@@ -1410,22 +1779,26 @@ var BindingSupportLib = {
 				//  into our existing heap allocation and then read it out of the heap. Doing this all in one operation
 				//  means that we only need to enter a gc safe region twice (instead of 3+ times with the normal,
 				//  slower check-type-and-then-unbox flow which has extra checks since unbox verifies the type).
-				"    var resultType = binding_support.mono_wasm_try_unbox_primitive_and_get_type (resultPtr, buffer);",
+				"    var unbox_buffer = binding_support._unbox_buffer;",
+				"    var resultType = binding_support.mono_wasm_try_unbox_primitive_and_get_type (resultPtr, unbox_buffer, binding_support._unbox_buffer_size);",
 				"    switch (resultType) {",
 				"    case 1:", // int
-				"        result = Module.HEAP32[buffer / 4]; break;",
+				"        result = Module.HEAP32[unbox_buffer / 4]; break;",
+				"    case 4:", // struct
+				"        result = binding_support._unbox_struct_rooted (unbox_buffer, resultPtr); break;",
 				"    case 25:", // uint32
-				"        result = Module.HEAPU32[buffer / 4]; break;",
+				"        result = Module.HEAPU32[unbox_buffer / 4]; break;",
 				"    case 24:", // float32
-				"        result = Module.HEAPF32[buffer / 4]; break;",
+				"        result = Module.HEAPF32[unbox_buffer / 4]; break;",
 				"    case 2:", // float64
-				"        result = Module.HEAPF64[buffer / 8]; break;",
+				"        result = Module.HEAPF64[unbox_buffer / 8]; break;",
 				"    case 8:", // boolean
-				"        result = (Module.HEAP32[buffer / 4]) !== 0; break;",
+				"        result = (Module.HEAP32[unbox_buffer / 4]) !== 0; break;",
 				"    case 28:", // char
-				"        result = String.fromCharCode(Module.HEAP32[buffer / 4]); break;",
+				"        result = String.fromCharCode(Module.HEAP32[unbox_buffer / 4]); break;",
 				"    default:",
-				"        result = binding_support._unbox_mono_obj_rooted_with_known_nonprimitive_type (resultRoot, resultType); break;",
+				"        var klass = Module.HEAPU32[unbox_buffer / 4];",
+				"        result = binding_support._unbox_mono_obj_rooted_with_known_nonprimitive_type (resultRoot, resultType, klass); break;",
 				"    }",
 				"}",
 				"",

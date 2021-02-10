@@ -10,7 +10,82 @@ namespace System.Runtime.InteropServices.JavaScript.Tests
 {
     public static class HelperMarshal
     {
+        public class CustomClass {
+            public double D;
+
+            private static CustomClass JSToManaged (double d) {
+                // Console.WriteLine("CustomClass.JSToManaged {0}", d);
+                return new CustomClass { D = d };
+            }
+
+            private static double ManagedToJS (CustomClass ct) {
+                // Console.WriteLine("CustomClass.ManagedToJS {0}", ct?.D);
+                return ct?.D ?? -1;
+            }
+        }
+
+        public struct CustomStruct {
+            public double D;
+
+            private static CustomStruct JSToManaged (double d) {
+                // Console.WriteLine("CustomStruct.JSToManaged {0}", d);
+                return new CustomStruct { D = d };
+            }
+
+            private static unsafe double ManagedToJS (ref CustomStruct ct) {
+                // Console.WriteLine("CustomStruct.ManagedToJS {0}", ct.D);
+                /*
+                fixed (CustomStruct *pCt = &ct)
+                    Console.WriteLine("arg ptr {0}", (uint)(UIntPtr)pCt);
+                */
+                return ct.D;
+            }
+        }
+
+        public struct CustomDate {
+            public DateTime Date;
+
+            private static string JSToManaged_PreFilter () => "value.toISOString()";
+            private static string ManagedToJS_PostFilter () => "new Date(value)";
+
+            private static CustomDate JSToManaged (string s) {
+                // Console.WriteLine($"CustomDate.JSToManaged({s})");
+                return new CustomDate { 
+                    Date = DateTime.Parse(s).ToUniversalTime()
+                };
+            }
+
+            private static string ManagedToJS (ref CustomDate cd) {
+                var result = cd.Date.ToString("o");
+                // Console.WriteLine($"CustomDate.ManagedToJS === {result}");
+                return result;
+            }
+        }
+
         internal const string INTEROP_CLASS = "[System.Private.Runtime.InteropServices.JavaScript.Tests]System.Runtime.InteropServices.JavaScript.Tests.HelperMarshal:";
+
+        internal static CustomClass _ccValue;
+        private static void InvokeCustomClass(CustomClass cc)
+        {
+            // Console.WriteLine("InvokeCustomClass got argument cc.D == {0}", cc?.D);
+            _ccValue = cc;
+        }
+        private static CustomClass ReturnCustomClass(CustomClass cc)
+        {
+            return cc;
+        }
+
+        internal static CustomStruct _csValue;
+        private static void InvokeCustomStruct(CustomStruct cs)
+        {
+            // Console.WriteLine("InvokeCustomStruct got argument cs.D == {0}", cs.D);
+            _csValue = cs;
+        }
+        private static CustomStruct ReturnCustomStruct(CustomStruct cs)
+        {
+            return cs;
+        }
+
         internal static int _i32Value;
         private static void InvokeI32(int a, int b)
         {
@@ -85,6 +160,32 @@ namespace System.Runtime.InteropServices.JavaScript.Tests
         {
             _object2 = obj;
             return obj;
+        }
+
+        internal static DateTime _dateTimeValue;
+        private static void InvokeDateTime(object boxed)
+        {
+            if (!(boxed is DateTime))
+                Console.WriteLine("boxed value was of type " + boxed.GetType());
+            _dateTimeValue = (DateTime)boxed;
+        }
+        private static void InvokeDateTimeByValue(DateTime dt)
+        {
+            _dateTimeValue = dt;
+        }
+        private static void InvokeCustomDate(CustomDate cd)
+        {
+            _dateTimeValue = cd.Date;
+        }
+        private static CustomDate ReturnCustomDate(CustomDate cd)
+        {
+            return cd;
+        }
+
+        internal static System.Uri _uriValue;
+        private static void InvokeUri(System.Uri uri)
+        {
+            _uriValue = uri;
         }
 
         internal static object _marshalledObject;

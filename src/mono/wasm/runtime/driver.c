@@ -593,12 +593,16 @@ mono_wasm_find_corlib_class (const char *namespace, const char *name)
 EMSCRIPTEN_KEEPALIVE MonoClass*
 mono_wasm_assembly_find_class (MonoAssembly *assembly, const char *namespace, const char *name)
 {
+	if (!assembly)
+		return NULL;
 	return mono_class_from_name (mono_assembly_get_image (assembly), namespace, name);
 }
 
 EMSCRIPTEN_KEEPALIVE MonoMethod*
 mono_wasm_assembly_find_method (MonoClass *klass, const char *name, int arguments)
 {
+	if (!klass)
+		return NULL;
 	return mono_class_get_method_from_name (klass, name, arguments);
 }
 
@@ -677,6 +681,8 @@ mono_wasm_assembly_get_entry_point (MonoAssembly *assembly)
 			return method;
 
 		MonoClass *klass = mono_method_get_class (method);
+		if (!klass)
+			return NULL;
 		char *async_name = malloc (name_length + 2);
 		snprintf (async_name, name_length + 2, "%s$", name);
 
@@ -742,6 +748,14 @@ mono_wasm_string_from_utf16 (const mono_unichar2 * chars, int length)
 static int
 class_is_task (MonoClass *klass)
 {
+	if (!klass)
+		return 0;
+
+	char * type_name = mono_type_get_name_full (mono_class_get_type(klass), MONO_TYPE_NAME_FORMAT_REFLECTION);
+	EM_ASM({
+		console.log("class_is_task", Module.UTF8ToString($0));
+	}, type_name);
+
 	if (!task_class && !resolved_task_class) {
 		task_class = mono_class_from_name (mono_get_corlib(), "System.Threading.Tasks", "Task");
 		resolved_task_class = 1;
@@ -762,6 +776,7 @@ MonoClass* mono_get_uri_class(MonoException** exc)
 	return klass;
 }
 
+#define MARSHAL_TYPE_NULL 0
 #define MARSHAL_TYPE_INT 1
 #define MARSHAL_TYPE_FP64 2
 #define MARSHAL_TYPE_STRING 3
@@ -793,6 +808,12 @@ MonoClass* mono_get_uri_class(MonoException** exc)
 #define MARSHAL_TYPE_UINT64 27
 #define MARSHAL_TYPE_CHAR 28
 #define MARSHAL_TYPE_STRING_INTERNED 29
+#define MARSHAL_TYPE_VOID 30
+
+// errors
+#define MARSHAL_ERROR_BUFFER_TOO_SMALL 512
+#define MARSHAL_ERROR_NULL_CLASS_POINTER 513
+#define MARSHAL_ERROR_NULL_TYPE_POINTER 514
 
 void mono_wasm_ensure_classes_resolved ()
 {
@@ -820,6 +841,8 @@ mono_wasm_marshal_type_from_mono_type (int mono_type, MonoClass *klass, MonoType
 {
 	switch (mono_type) {
 	// case MONO_TYPE_CHAR: prob should be done not as a number?
+	case MONO_TYPE_VOID:
+		return MARSHAL_TYPE_VOID;
 	case MONO_TYPE_BOOLEAN:
 		return MARSHAL_TYPE_BOOL;
 	case MONO_TYPE_I1:
@@ -845,28 +868,32 @@ mono_wasm_marshal_type_from_mono_type (int mono_type, MonoClass *klass, MonoType
 	case MONO_TYPE_STRING:
 		return MARSHAL_TYPE_STRING;
 	case MONO_TYPE_SZARRAY:  { // simple zero based one-dim-array
-		MonoClass *eklass = mono_class_get_element_class (klass);
-		MonoType *etype = mono_class_get_type (eklass);
+		if (klass) {
+			MonoClass *eklass = mono_class_get_element_class (klass);
+			MonoType *etype = mono_class_get_type (eklass);
 
-		switch (mono_type_get_type (etype)) {
-			case MONO_TYPE_U1:
-				return MARSHAL_ARRAY_UBYTE;
-			case MONO_TYPE_I1:
-				return MARSHAL_ARRAY_BYTE;
-			case MONO_TYPE_U2:
-				return MARSHAL_ARRAY_USHORT;
-			case MONO_TYPE_I2:
-				return MARSHAL_ARRAY_SHORT;
-			case MONO_TYPE_U4:
-				return MARSHAL_ARRAY_UINT;
-			case MONO_TYPE_I4:
-				return MARSHAL_ARRAY_INT;
-			case MONO_TYPE_R4:
-				return MARSHAL_ARRAY_FLOAT;
-			case MONO_TYPE_R8:
-				return MARSHAL_ARRAY_DOUBLE;
-			default:
-				return MARSHAL_TYPE_OBJECT;
+			switch (mono_type_get_type (etype)) {
+				case MONO_TYPE_U1:
+					return MARSHAL_ARRAY_UBYTE;
+				case MONO_TYPE_I1:
+					return MARSHAL_ARRAY_BYTE;
+				case MONO_TYPE_U2:
+					return MARSHAL_ARRAY_USHORT;
+				case MONO_TYPE_I2:
+					return MARSHAL_ARRAY_SHORT;
+				case MONO_TYPE_U4:
+					return MARSHAL_ARRAY_UINT;
+				case MONO_TYPE_I4:
+					return MARSHAL_ARRAY_INT;
+				case MONO_TYPE_R4:
+					return MARSHAL_ARRAY_FLOAT;
+				case MONO_TYPE_R8:
+					return MARSHAL_ARRAY_DOUBLE;
+				default:
+					return MARSHAL_TYPE_OBJECT;
+			}
+		} else {
+			return MARSHAL_TYPE_OBJECT;
 		}
 	}
 	default:
@@ -876,22 +903,31 @@ mono_wasm_marshal_type_from_mono_type (int mono_type, MonoClass *klass, MonoType
 			return MARSHAL_TYPE_DATE;
 		if (klass == datetimeoffset_class)
 			return MARSHAL_TYPE_DATEOFFSET;
-		if (uri_class && mono_class_is_assignable_from(uri_class, klass))
+		if (uri_class && klass && mono_class_is_assignable_from(uri_class, klass))
 			return MARSHAL_TYPE_URI;
-		if (mono_class_is_enum (klass))
+		if (klass && mono_class_is_enum (klass))
 			return MARSHAL_TYPE_ENUM;
-		if (!mono_type_is_reference (type)) //vt
+		if (type && !mono_type_is_reference (type)) //vt
 			return MARSHAL_TYPE_VT;
-		if (mono_class_is_delegate (klass))
+		if (klass && mono_class_is_delegate (klass))
 			return MARSHAL_TYPE_DELEGATE;
-		if (class_is_task(klass))
+		if (klass && class_is_task(klass))
 			return MARSHAL_TYPE_TASK;
-		if (safehandle_class && (klass == safehandle_class || mono_class_is_subclass_of(klass, safehandle_class, 0))) {
+		if (klass && safehandle_class && (klass == safehandle_class || mono_class_is_subclass_of(klass, safehandle_class, 0))) {
 			return MARSHAL_TYPE_SAFEHANDLE;
 		}
 
 		return MARSHAL_TYPE_OBJECT;
 	}
+}
+
+EMSCRIPTEN_KEEPALIVE int
+mono_wasm_get_obj_class (MonoObject *obj)
+{
+	if (!obj)
+		return 0;
+
+	return mono_object_get_class (obj);
 }
 
 EMSCRIPTEN_KEEPALIVE int
@@ -902,11 +938,17 @@ mono_wasm_get_obj_type (MonoObject *obj)
 
 	/* Process obj before calling into the runtime, class_from_name () can invoke managed code */
 	MonoClass *klass = mono_object_get_class (obj);
-	if ((klass == mono_get_string_class ()) &&
-		(mono_string_is_interned ((MonoString *)obj) == (MonoString *)obj))
+	if (!klass)
+		return MARSHAL_ERROR_NULL_CLASS_POINTER;
+	if (
+		(klass == mono_get_string_class ()) &&
+		(mono_string_is_interned ((MonoString *)obj) == (MonoString *)obj)
+	)
 		return MARSHAL_TYPE_STRING_INTERNED;
 
 	MonoType *type = mono_class_get_type (klass);
+	if (!type)
+		return MARSHAL_ERROR_NULL_TYPE_POINTER;
 	obj = NULL;
 
 	int mono_type = mono_type_get_type (type);
@@ -915,30 +957,55 @@ mono_wasm_get_obj_type (MonoObject *obj)
 }
 
 EMSCRIPTEN_KEEPALIVE int
-mono_wasm_try_unbox_primitive_and_get_type (MonoObject *obj, void *result)
+mono_wasm_try_unbox_primitive_and_get_type (MonoObject *obj, void *result, int result_capacity)
 {
 	int *resultI = result;
 	int64_t *resultL = result;
 	float *resultF = result;
 	double *resultD = result;
 
+	if (!result)
+		return MARSHAL_ERROR_BUFFER_TOO_SMALL;
+
+	if (result_capacity < 16) {
+		if (result_capacity >= sizeof (int64_t))
+			*resultL = 0;
+		return MARSHAL_ERROR_BUFFER_TOO_SMALL;
+	}
+
 	if (!obj) {
 		*resultL = 0;
-		return 0;
+		return MARSHAL_TYPE_NULL;
 	}
 
 	/* Process obj before calling into the runtime, class_from_name () can invoke managed code */
 	MonoClass *klass = mono_object_get_class (obj);
-	if ((klass == mono_get_string_class ()) &&
-		(mono_string_is_interned ((MonoString *)obj) == (MonoString *)obj)) {
+	if (!klass) {
+		*resultL = 0;
+		return MARSHAL_ERROR_NULL_CLASS_POINTER;
+	}
+
+	if (
+		(klass == mono_get_string_class ()) &&
+		(mono_string_is_interned ((MonoString *)obj) == (MonoString *)obj)
+	) {
 		*resultL = 0;
 		return MARSHAL_TYPE_STRING_INTERNED;
 	}
 
 	MonoType *type = mono_class_get_type (klass), *original_type = type;
+	if (!type) {
+		*resultL = 0;
+		return MARSHAL_ERROR_NULL_TYPE_POINTER;
+	}
 
 	if (mono_class_is_enum (klass))
 		type = mono_type_get_underlying_type (type);
+
+	if (!type) {
+		*resultL = 0;
+		return MARSHAL_ERROR_NULL_TYPE_POINTER;
+	}
 	
 	int mono_type = mono_type_get_type (type);
 	
@@ -979,10 +1046,42 @@ mono_wasm_try_unbox_primitive_and_get_type (MonoObject *obj, void *result)
 			//  but there's no reason not to future-proof this API
 			*resultL = *(int64_t*)mono_object_unbox (obj);
 			break;
+		case MONO_TYPE_VALUETYPE:
+			{
+				int obj_size = mono_object_get_size (obj), 
+					required_size = (sizeof (int)) + (sizeof (MonoClass *)) + obj_size;
+
+				// Check whether this struct has special-case marshaling
+				// FIXME: Do we need to null out obj before this?
+				int marshal_type = mono_wasm_marshal_type_from_mono_type (mono_type, klass, original_type);
+				if (marshal_type != MARSHAL_TYPE_VT) {
+					*resultL = 0;
+					return marshal_type;
+				}
+
+				// Check whether the result buffer is big enough for the struct and padding
+				if (result_capacity < required_size) {
+					*resultL = 0;
+					return MARSHAL_ERROR_BUFFER_TOO_SMALL;
+				}
+
+				// Store a header before the struct data with the size of the data and its class
+				*resultI = obj_size;
+				MonoClass ** resultClass = (MonoClass **)(resultI + 1);
+				*resultClass = klass;
+				void * resultVoid = (resultI + 2);
+				void * unboxed = mono_object_unbox (obj);
+				memcpy (resultVoid, unboxed, obj_size);
+				return MARSHAL_TYPE_VT;
+			}
+			break;
 		default:
 			// If we failed to do a fast unboxing, return the original type information so
 			//  that the caller can do a proper, slow unboxing later
 			*resultL = 0;
+			// HACK: Store the class pointer into the result buffer so our caller doesn't
+			//  have to call back into the native runtime later to get it
+			*resultI = klass;
 			obj = NULL;
 			return mono_wasm_marshal_type_from_mono_type (mono_type, klass, original_type);
 	}
@@ -1098,4 +1197,127 @@ EMSCRIPTEN_KEEPALIVE MonoString *
 mono_wasm_intern_string (MonoString *string) 
 {
 	return mono_string_intern (string);
+}
+
+typedef struct wasm_method_signature_info {
+	int result_marshal_type;
+	MonoClass* result_class;
+	int parameter_count;
+	int* parameter_marshal_types;
+	MonoClass** parameter_classes;
+} wasm_method_signature_info;
+
+void build_signature_info_record (MonoType *type, int* resultMtype, MonoClass** resultClass) {
+	if (!type) {
+		*resultMtype = 0;
+		*resultClass = 0;
+		return;
+	}
+
+	int mono_type = mono_type_get_type (type);
+	MonoClass * klass = mono_type_get_class (type);
+	if (!klass) {
+		*resultMtype = 0;
+		*resultClass = 0;
+		return;
+	}
+	*resultMtype = mono_wasm_marshal_type_from_mono_type (mono_type, klass, type);
+	*resultClass = klass;
+
+	/*
+	const char * tname = mono_type_get_name (type);
+	EM_ASM({
+		var mtype = $0;
+		var type = $1;
+		var tname = Module.UTF8ToString ($2);
+		var klass = $3;
+		var mono_type = $4;
+		console.log (mtype, type, tname, klass, mono_type);
+	}, *resultMtype, *resultType, tname, klass, mono_type);
+	*/
+}
+
+// FIXME
+MONO_API MonoGenericContext*
+mono_class_get_context (MonoClass *klass);
+
+// FIXME
+MONO_API MonoMethodSignature *
+mono_metadata_get_inflated_signature (MonoMethodSignature *sig, MonoGenericContext *context);
+
+EMSCRIPTEN_KEEPALIVE wasm_method_signature_info * 
+mono_wasm_create_method_signature_info (MonoClass *klass, MonoMethod *method) 
+{
+	if (!method)
+		return 0;
+
+	MonoMethodSignature *raw_sig = mono_method_signature (method);
+	if (!raw_sig)
+		return 0;
+
+	MonoGenericContext *generic_ctx = mono_class_get_context (klass), *sig;
+	if (!generic_ctx) {
+		sig = raw_sig;
+	} else {
+		sig = mono_metadata_get_inflated_signature (raw_sig, generic_ctx);
+	}
+	if (!sig)
+		return 0;
+
+	int parameter_count = mono_signature_get_param_count (sig);
+	int allocation_size = sizeof(wasm_method_signature_info) /* + 
+		(parameter_count * sizeof(int)) +
+		(parameter_count * sizeof(MonoClass *)) */ +
+		12;
+
+	wasm_method_signature_info *result = malloc (allocation_size);
+	memset (result, 0, allocation_size);
+
+	result->parameter_count = parameter_count;
+	result->parameter_marshal_types = malloc(sizeof(int) * (parameter_count + 1));
+	memset(result->parameter_marshal_types, 0, parameter_count * sizeof(int));
+	
+	// (((char *)result) + sizeof(wasm_method_signature_info) + 4);
+	result->parameter_classes = malloc(sizeof (MonoClass *) * (parameter_count + 1));
+	memset(result->parameter_classes, 0, parameter_count * sizeof(MonoClass *));
+	
+	// ((char *)result->parameter_marshal_types) + (sizeof(int) * parameter_count) + 4;
+
+	EM_ASM({
+		console.debug("creating signature info for method result", Module.UTF8ToString ($0));
+	}, mono_method_get_full_name (method));
+
+	build_signature_info_record (mono_signature_get_return_type (sig), &result->result_marshal_type, &result->result_class);
+
+	EM_ASM({
+		console.debug("creating signature info for method params", Module.UTF8ToString ($0));
+	}, mono_method_get_full_name (method));
+
+	int i = 0;
+	void *iter = 0;
+	MonoType *p = 0;
+	while ((p = mono_signature_get_params (sig, &iter)) != 0) {
+		build_signature_info_record (p, &(result->parameter_marshal_types[i]), &(result->parameter_classes[i]));
+		i++;
+	}
+
+	return result;
+}
+
+EMSCRIPTEN_KEEPALIVE void *
+mono_wasm_unbox_rooted (MonoObject *obj)
+{
+	if (!obj)
+		return 0;
+	return mono_object_unbox (obj);
+}
+
+EMSCRIPTEN_KEEPALIVE MonoClass * 
+mono_wasm_get_class_for_bind_or_invoke (MonoObject *this_arg, MonoMethod *method) {
+	if (this_arg)
+		return mono_object_get_class (this_arg);
+	else if (method)
+		return mono_method_get_class (method);
+	else
+		return 0;
 }
