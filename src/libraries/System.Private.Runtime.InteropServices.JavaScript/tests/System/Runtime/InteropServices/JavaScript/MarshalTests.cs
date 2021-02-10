@@ -847,5 +847,121 @@ namespace System.Runtime.InteropServices.JavaScript.Tests
             Assert.Equal(HelperMarshal._stringResource, HelperMarshal._stringResource2);
             Assert.True(Object.ReferenceEquals(HelperMarshal._stringResource, HelperMarshal._stringResource2));
         }
+
+        const string ExpectedDateString = "1937-07-02T05:35:02.0000000Z";
+        static readonly DateTime ExpectedDateTime = DateTime.Parse(ExpectedDateString).ToUniversalTime();
+
+        [Fact]
+        public static void MarshalDateTime()
+        {
+            HelperMarshal._dateTimeValue = default(DateTime);
+            Runtime.InvokeJS(
+                $"var dt = new Date('{ExpectedDateString}');\r\n" +
+                "App.call_test_method ('InvokeDateTime', [ dt ], 'o');"
+            );
+            Assert.Equal(ExpectedDateTime, HelperMarshal._dateTimeValue);
+        }
+
+        [Fact]
+        public static void MarshalDateTimeAutomatic()
+        {
+            HelperMarshal._dateTimeValue = default(DateTime);
+            Runtime.InvokeJS(
+                $"var dt = new Date('{ExpectedDateString}');\r\n" +
+                "App.call_test_method ('InvokeDateTime', [ dt ]);"
+            );
+            Assert.Equal(ExpectedDateTime, HelperMarshal._dateTimeValue);
+        }
+
+        // FIXME
+        /*
+        [Fact]
+        public static void MarshalDateTimeByValueAutomatic()
+        {
+            HelperMarshal._dateTimeValue = default(DateTime);
+            Runtime.InvokeJS(
+                $"var dt = new Date('{ExpectedDateString}');\r\n" +
+                "App.call_test_method ('InvokeDateTimeByValue', [ 12345 ], 'a');"
+            );
+            Assert.Equal(ExpectedDateTime, HelperMarshal._dateTimeValue);
+        }
+        */
+
+        [Fact]
+        public static void MarshalUri()
+        {
+            var expected = new System.Uri("https://www.example.com/");
+            HelperMarshal._uriValue = default(System.Uri);
+            Runtime.InvokeJS(
+                @"var uri = 'https://www.example.com/';
+                App.call_test_method ('InvokeUri', [ uri ], 'u');"
+            );
+            Assert.Equal(expected, HelperMarshal._uriValue);
+        }
+
+        [Fact]
+        public static void MarshalCustomClassAutomatic()
+        {
+            HelperMarshal._ccValue = new HelperMarshal.CustomClass ();
+            Runtime.InvokeJS(
+                @"App.call_test_method ('InvokeCustomClass', [ 4.13 ], 'a');"
+            );
+            Assert.Equal(4.13, HelperMarshal._ccValue?.D);
+        }
+
+        [Fact]
+        public static void MarshalCustomStructAutomatic()
+        {
+            HelperMarshal._csValue = default(HelperMarshal.CustomStruct);
+            Runtime.InvokeJS(
+                @"App.call_test_method ('InvokeCustomStruct', [ 4.13 ], 'a');"
+            );
+            Assert.Equal(4.13, HelperMarshal._csValue.D);
+        }
+
+        [Fact]
+        public static void MarshalCustomDateAutomatic()
+        {
+            HelperMarshal._dateTimeValue = default(DateTime);
+            Runtime.InvokeJS(
+                $"var dt = new Date('{ExpectedDateString}');\r\n" +
+                @"App.call_test_method ('InvokeCustomDate', [ dt ], 'a');"
+            );
+            Assert.Equal(ExpectedDateTime, HelperMarshal._dateTimeValue);
+        }
+
+        [Fact]
+        public static void ReturnCustomClass()
+        {
+            HelperMarshal._ccValue = new HelperMarshal.CustomClass ();
+            Runtime.InvokeJS(
+                @"var cc = App.call_test_method ('ReturnCustomClass', [ 4.13 ], 'a');" +
+                @"App.call_test_method ('InvokeCustomClass', [ cc ], 'a');"
+            );
+            Assert.Equal(4.13, HelperMarshal._ccValue?.D);
+        }
+
+        [Fact]
+        public static void ReturnCustomStruct()
+        {
+            HelperMarshal._csValue = default(HelperMarshal.CustomStruct);
+            Runtime.InvokeJS(
+                @"var cs = App.call_test_method ('ReturnCustomStruct', [ 4.13 ], 'a');" +
+                @"App.call_test_method ('InvokeCustomStruct', [ cs ], 'a');"
+            );
+            Assert.Equal(4.13, HelperMarshal._csValue.D);
+        }
+
+        [Fact]
+        public static void ReturnCustomDate()
+        {
+            HelperMarshal._dateTimeValue = default(DateTime);
+            Runtime.InvokeJS(
+                $"var dt = new Date('{ExpectedDateString}');\r\n" +
+                @"var cd = App.call_test_method ('ReturnCustomDate', [ dt ], 'a');" +
+                @"App.call_test_method ('InvokeCustomDate', [ cd ], 'a');"
+            );
+            Assert.Equal(ExpectedDateTime, HelperMarshal._dateTimeValue);
+        }
     }
 }
